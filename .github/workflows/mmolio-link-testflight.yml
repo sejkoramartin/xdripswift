@@ -1,0 +1,159 @@
+name: Mmolio Link TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full Mmolio Link commit SHA
+        required: true
+        type: string
+      publish:
+        description: Upload signed build to TestFlight
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mmolio-link-testflight
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: macos-26
+    steps:
+      - name: Validate commit SHA
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+
+      - name: Check out Mmolio Link source without signing credentials
+        uses: actions/checkout@v4
+        with:
+          repository: sejkoramartin/Mmolio-Link
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Verify source and translations
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 scripts/check-czech-localization.py
+          bash tests/garmin-delivery/run.sh
+          bash tests/g7-trend/run.sh
+          bash tests/g7-trend/migration.sh
+
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      # A Team ID is a public identifier; no certificate, token, or API key is
+      # available to source code or build scripts in this job.
+      - name: Build unsigned archive
+        env:
+          TEAM_ID: ${{ secrets.TEAMID }}
+        run: |
+          set -o pipefail
+          BUILD_NUMBER="$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          xcodebuild -resolvePackageDependencies -project xdrip.xcodeproj -scheme xdrip
+          xcodebuild archive \
+            -project xdrip.xcodeproj \
+            -scheme xdrip \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/MmolioLink.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            XDRIP_DEVELOPMENT_TEAM="$TEAM_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+          ditto -c -k --keepParent "$RUNNER_TEMP/MmolioLink.xcarchive" "$RUNNER_TEMP/MmolioLink.zip"
+
+      - name: Store unsigned archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: mmolio-unsigned-${{ github.run_id }}
+          path: ${{ runner.temp }}/MmolioLink.zip
+          retention-days: 1
+
+  sign:
+    needs: archive
+    runs-on: macos-26
+    steps:
+      # This job never checks out Mmolio Link source. Its scripts and Fastfile
+      # come exclusively from the existing trusted xdripswift repository.
+      - name: Check out trusted release tools
+        uses: actions/checkout@v4
+        with:
+          repository: sejkoramartin/xdripswift
+          ref: master
+          persist-credentials: false
+
+      - name: Download unsigned archive
+        uses: actions/download-artifact@v4
+        with:
+          name: mmolio-unsigned-${{ github.run_id }}
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Extract unsigned archive
+        run: ditto -x -k "$RUNNER_TEMP/unsigned/MmolioLink.zip" "$RUNNER_TEMP"
+
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Install existing signing identities
+        env:
+          TEAM_ID: ${{ secrets.TEAMID }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+        run: |
+          for key in TEAM_ID GH_PAT MATCH_PASSWORD; do test -n "${!key}" || exit 1; done
+          bundle exec fastlane run setup_ci
+          export MATCH_GIT_BASIC_AUTHORIZATION="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
+          echo "::add-mask::$MATCH_GIT_BASIC_AUTHORIZATION"
+          bundle exec fastlane run match \
+            type:appstore readonly:true \
+            app_identifier:"com.$TEAM_ID.xdripswift,com.$TEAM_ID.xdripswift.xDripWidget,com.$TEAM_ID.xdripswift.watchkitapp,com.$TEAM_ID.xdripswift.watchkitapp.xDripWatchComplication,com.$TEAM_ID.xdripswift.xDripNotificationContextExtension"
+
+      - name: Export signed IPA from archive
+        env:
+          TEAM_ID: ${{ secrets.TEAMID }}
+        run: |
+          python3 - <<'PY'
+          import os, plistlib
+          team = os.environ['TEAM_ID']
+          base = f'com.{team}.xdripswift'
+          ids = [base, base + '.xDripWidget', base + '.watchkitapp',
+                 base + '.watchkitapp.xDripWatchComplication',
+                 base + '.xDripNotificationContextExtension']
+          options = {
+              'method': 'app-store', 'teamID': team,
+              'signingStyle': 'manual', 'signingCertificate': 'Apple Distribution',
+              'manageAppVersionAndBuildNumber': False,
+              'provisioningProfiles': {bundle: f'match AppStore {bundle}' for bundle in ids},
+          }
+          with open(os.environ['RUNNER_TEMP'] + '/ExportOptions.plist', 'wb') as out:
+              plistlib.dump(options, out)
+          PY
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/MmolioLink.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+          IPA_PATH="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)"
+          test -n "$IPA_PATH"
+          cp "$IPA_PATH" Xdrip4iOS.ipa
+
+      - name: Upload signed build to TestFlight
+        if: inputs.publish
+        env:
+          TEAMID: ${{ secrets.TEAMID }}
+          FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
+          FASTLANE_ISSUER_ID: ${{ secrets.FASTLANE_ISSUER_ID }}
+          FASTLANE_KEY: ${{ secrets.FASTLANE_KEY }}
+        run: bundle exec fastlane ios release
