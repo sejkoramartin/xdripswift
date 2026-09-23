@@ -7,6 +7,10 @@ on:
         description: Full Mmolio Link commit SHA
         required: true
         type: string
+      archive_run_id:
+        description: Previous archive run ID for signing-only diagnostics (never uploads)
+        required: false
+        type: string
       publish:
         description: Upload signed build to TestFlight
         required: true
@@ -22,6 +26,7 @@ concurrency:
 
 jobs:
   archive:
+    if: inputs.archive_run_id == ''
     runs-on: macos-26
     steps:
       - name: Validate commit SHA
@@ -80,6 +85,7 @@ jobs:
 
   sign:
     needs: archive
+    if: always() && (needs.archive.result == 'success' || (inputs.archive_run_id != '' && !inputs.publish))
     runs-on: macos-26
     steps:
       # This job never checks out Mmolio Link source. Its scripts and Fastfile
@@ -94,7 +100,9 @@ jobs:
       - name: Download unsigned archive
         uses: actions/download-artifact@v4
         with:
-          name: mmolio-unsigned-${{ github.run_id }}
+          name: mmolio-unsigned-${{ inputs.archive_run_id || github.run_id }}
+          run-id: ${{ inputs.archive_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           path: ${{ runner.temp }}/unsigned
 
       - name: Extract unsigned archive
@@ -113,6 +121,8 @@ jobs:
           TEAM_ID: ${{ secrets.TEAMID }}
           GH_PAT: ${{ secrets.GH_PAT }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_KEYCHAIN_NAME: fastlane_tmp_keychain
+          MATCH_KEYCHAIN_PASSWORD: ''
         run: |
           for key in TEAM_ID GH_PAT MATCH_PASSWORD; do test -n "${!key}" || exit 1; done
           bundle exec fastlane run setup_ci
@@ -151,7 +161,7 @@ jobs:
           cp "$IPA_PATH" Xdrip4iOS.ipa
 
       - name: Upload signed build to TestFlight
-        if: inputs.publish
+        if: inputs.publish && inputs.archive_run_id == ''
         env:
           TEAMID: ${{ secrets.TEAMID }}
           FASTLANE_KEY_ID: ${{ secrets.FASTLANE_KEY_ID }}
