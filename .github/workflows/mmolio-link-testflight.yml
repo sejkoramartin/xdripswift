@@ -121,11 +121,11 @@ jobs:
           TEAM_ID: ${{ secrets.TEAMID }}
           GH_PAT: ${{ secrets.GH_PAT }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          MATCH_KEYCHAIN_NAME: fastlane_tmp_keychain
-          MATCH_KEYCHAIN_PASSWORD: ''
         run: |
           for key in TEAM_ID GH_PAT MATCH_PASSWORD; do test -n "${!key}" || exit 1; done
           bundle exec fastlane run setup_ci
+          export MATCH_KEYCHAIN_NAME=fastlane_tmp_keychain
+          export MATCH_KEYCHAIN_PASSWORD=''
           export MATCH_GIT_BASIC_AUTHORIZATION="$(printf '%s:%s' "$GITHUB_REPOSITORY_OWNER" "$GH_PAT" | base64 | tr -d '\n')"
           echo "::add-mask::$MATCH_GIT_BASIC_AUTHORIZATION"
           bundle exec fastlane run match \
