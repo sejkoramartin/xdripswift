@@ -44,7 +44,11 @@ platform :ios do
       api_key: api_key,
     )
 
-    current_build_number = previous_build_number + 1
+    # latest_testflight_build_number can return a string such as "20260924.7" when a
+    # build was uploaded with a dotted build number. Taking the leading component keeps
+    # the number increasing, which App Store Connect requires, and behaves exactly as
+    # before for the plain integers xDrip4iOS normally uses.
+    current_build_number = previous_build_number.to_s.split(".").first.to_i + 1
 
     increment_build_number(
       xcodeproj: "#{GITHUB_WORKSPACE}/xdrip.xcodeproj",
@@ -68,7 +72,11 @@ platform :ios do
       api_key: api_key,
     )
 
-    current_build_number = previous_build_number + 1
+    # latest_testflight_build_number can return a string such as "20260924.7" when a
+    # build was uploaded with a dotted build number. Taking the leading component keeps
+    # the number increasing, which App Store Connect requires, and behaves exactly as
+    # before for the plain integers xDrip4iOS normally uses.
+    current_build_number = previous_build_number.to_s.split(".").first.to_i + 1
 
     increment_build_number(
       xcodeproj: "#{GITHUB_WORKSPACE}/xdrip.xcodeproj",
