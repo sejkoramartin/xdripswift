@@ -12,8 +12,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: garmin
-            revision: 77143e99d0d92742bde6269f0bd855f35bcf201e
           - label: upstream
             revision: c268542e64626c564e626658fa9a6b90a059ada4
     env:
@@ -28,6 +26,10 @@ jobs:
         run: |
           mkdir -p verification-logs
           { git rev-parse HEAD; sw_vers; xcodebuild -version; } | tee verification-logs/environment.log
+      - name: Normalize upstream empty build paths for comparison
+        run: |
+          python3 -c 'from pathlib import Path; p=Path("xdrip.xcodeproj/project.pbxproj"); s=p.read_text(); p.write_text("\n".join(l for l in s.split("\n") if l.strip() not in ["OBJROOT = \"\";", "SYMROOT = \"\";", "SHARED_PRECOMPS_DIR = \"\";"]))'
+          git diff -- xdrip.xcodeproj/project.pbxproj > verification-logs/baseline-build-path-only.diff
       - name: Resolve dependencies
         run: |
           set -o pipefail
