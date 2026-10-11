@@ -1,0 +1,50 @@
+name: Garmin upstream macOS verification
+on:
+  push:
+    branches: [codex/garmin-macos-verification]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      SOURCE_REVISION: 77143e99d0d92742bde6269f0bd855f35bcf201e
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+          persist-credentials: false
+          submodules: recursive
+      - name: Environment and exact revision
+        run: |
+          mkdir -p verification-logs
+          { git rev-parse HEAD; sw_vers; xcodebuild -version; swift --version; } | tee verification-logs/environment.log
+      - name: Standalone Garmin tests on macOS
+        run: |
+          set -o pipefail
+          bash tests/garmin-delivery/run.sh | tee verification-logs/garmin-tests.log
+      - name: Resolve real SDK and dependencies
+        id: resolve
+        run: |
+          xcodebuild -resolvePackageDependencies -project xdrip.xcodeproj -scheme xdrip -clonedSourcePackagesDirPath "$RUNNER_TEMP/packages" > verification-logs/resolve.log 2>&1 || { tail -100 verification-logs/resolve.log; exit 1; }
+      - name: Build unsigned iPhone application
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: |
+          xcodebuild -project xdrip.xcodeproj -scheme xdrip -configuration Debug -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/device-build" -clonedSourcePackagesDirPath "$RUNNER_TEMP/packages" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build > verification-logs/iphone-build.log 2>&1 || { tail -120 verification-logs/iphone-build.log; exit 1; }
+          tail -5 verification-logs/iphone-build.log
+      - name: Upstream XCTest on iOS simulator
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: |
+          xcrun simctl list devices available -j > verification-logs/simulators.json
+          simulator=$(python3 -c 'import json; d=json.load(open("verification-logs/simulators.json")); print(next(v["udid"] for k,vs in d["devices"].items() if "iOS" in k for v in vs if "iPhone" in v["name"]))')
+          xcodebuild -project xdrip.xcodeproj -scheme xdrip -configuration Debug -destination "platform=iOS Simulator,id=$simulator" -derivedDataPath "$RUNNER_TEMP/simulator-build" -clonedSourcePackagesDirPath "$RUNNER_TEMP/packages" -resultBundlePath verification-logs/upstream-tests.xcresult CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test > verification-logs/simulator-tests.log 2>&1 || { tail -120 verification-logs/simulator-tests.log; exit 1; }
+          tail -15 verification-logs/simulator-tests.log
+      - name: Save verification evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: garmin-macos-verification
+          path: verification-logs
+          retention-days: 14
